@@ -40,29 +40,31 @@ import time
 # env.close()
 
 
-def train_step(model, experiences, target_model):
-    current_states = torch.stack([torch.Tensor(e.state) for e in experiences])
-    actions = torch.tensor([e.action for e in experiences]).unsqueeze(1) # shape (N,1); unsqueeze:"Returns a new tensor with a dimension of size one inserted at the specified position."
-    rewards = torch.tensor([torch.tensor(e.reward) for e in experiences])
-    next_states = torch.stack([torch.Tensor(e.next_state) for e in experiences])
-    terminated = torch.stack([torch.Tensor([0]) if e.terminated else torch.Tensor([1]) for e in experiences])
-    truncated = torch.stack([torch.Tensor([0]) if e.truncated else torch.Tensor([1]) for e in experiences])
+def train_step(model, experiences, target_model, discount_factor=0.99):
+    device = torch.device("cuda")
+
+    current_states = torch.stack([torch.Tensor(e.state) for e in experiences]).to(device)
+    actions = torch.tensor([e.action for e in experiences]).to(device).unsqueeze(1) # shape (N,1); unsqueeze:"Returns a new tensor with a dimension of size one inserted at the specified position."
+    rewards = torch.tensor([torch.tensor(e.reward) for e in experiences]).to(device)
+    next_states = torch.stack([torch.Tensor(e.next_state) for e in experiences]).to(device)
+    terminated = torch.stack([torch.Tensor([0]) if e.terminated else torch.Tensor([1]) for e in experiences]).to(device)
+    truncated = torch.stack([torch.Tensor([0]) if e.truncated else torch.Tensor([1]) for e in experiences]).to(device)
 
     # Evaluating the model with torch.no_grad() ensures that no gradients are computed during test mode. Also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
     with torch.no_grad():
-        target_q_values_nextstate = target_model(next_states) # Q(s',a'; \theta^{-}) shape: (N, num_actions)
+        target_q_values_nextstate = target_model(next_states).to(device) # Q(s',a'; \theta^{-}) shape: (N, num_actions)
     
     model_q_values = model(current_states) # [Q(s,a_0; \theta_{i}), Q(s,a_1; \theta_{i}), ... , Q(s,a_num_actions; \theta_{i})] shape: (N, num_actions)
     # nos nao queremos isto, queremos ir buscar especificamente Q(s,a; \theta_{i}), temos que usar o vetor actions
     model_q_a_values = torch.gather(model_q_values, 1, actions) # isto funciona porque actions é 0 ou 1, caso contrário seria preciso one hot encoding, para cada linha do model_q_values vai buscar a coluna action (0 ou 1) respetiva, obtendo corretamente Q(s,a; \theta_{i})
     # https://docs.pytorch.org/docs/stable/generated/torch.gather.html
 
-    max_q_target = torch.max(target_q_values_nextstate, 1, keepdim=True).values # (N,1) max values over each line (dimension to reduce is over the number of actions)
+    max_q_target = torch.max(target_q_values_nextstate, 1, keepdim=True).values# (N,1) max values over each line (dimension to reduce is over the number of actions)
     
 
 
     # falta discount factor
-    loss = torch.mean((rewards + terminated*max_q_target - model_q_a_values)**2) # eq. in pag. 260 Será que vai dar erro? visto que tem que ser diferenciavel??
+    loss = torch.mean((rewards + discount_factor*terminated*max_q_target - model_q_a_values)**2)# eq. in pag. 260 Será que vai dar erro? visto que tem que ser diferenciavel??
 
 
     model.optimizer.zero_grad() # zero the gradient buffers
@@ -72,29 +74,30 @@ def train_step(model, experiences, target_model):
 
 
 
-def main(testing=False, checkpoint=None):
+def main(testing=False, checkpoint=None, optional_name="linear decay greedy"):
+    device = torch.device("cuda")
     if testing:
         env = gym.make('CartPole-v1', render_mode='human')
     else:
         env = gym.make('CartPole-v1')
     last_observation, info = env.reset()
 
-    m = Model(env.observation_space.shape, env.action_space.n)
+    m = Model(env.observation_space.shape, env.action_space.n).to(device)
 
     if checkpoint is not None:
         m.load_state_dict(torch.load(checkpoint))
         m.eval() # ?????
 
-    target_m = Model(env.observation_space.shape, env.action_space.n)
+    target_m = Model(env.observation_space.shape, env.action_space.n).to(device)
     target_m.load_state_dict(m.state_dict())
 
     rb = ReplayBuffer()
 
 
     min_rb_size = 10000 # minimum buffer to start training
-    sample_size = 64
-    env_steps_before_traing = 10
-    target_model_update = 500 # atualiza a target a cada N TRAINING steps, isto é N epochs, em raw steps: N*env_steps_before_traing
+    sample_size = 300
+    env_steps_before_traing = 100
+    target_model_update = 30 # atualiza a target a cada N TRAINING steps, isto é N epochs, em raw steps: N*env_steps_before_traing
 
     # linear decay greedy
     init_epsilon = 1.0
@@ -104,6 +107,8 @@ def main(testing=False, checkpoint=None):
     last_episodes_length = 50
     last_episodes_rewards = deque(maxlen=last_episodes_length) # episodios antigos sao removidos para dara lugar aos novos, assim mantem se track sempre dos ultimos
     current_episode_reward = 0.0
+    
+    discount_factor = 0.99
 
     import wandb
     
@@ -111,7 +116,7 @@ def main(testing=False, checkpoint=None):
         run = wandb.init(
             entity="franciscolaranjo9-personal",
             project="dqn-cartpole",
-            name="linear decay greedy",
+            name=optional_name,
             config = {"min_rb_size" : min_rb_size, 
                     "sample_size" : sample_size,
                     "env_steps_before_traing" : env_steps_before_traing,
@@ -120,7 +125,8 @@ def main(testing=False, checkpoint=None):
                     "min_epsilon" : min_epsilon,
                     "decay_episodes" : decay_episodes,
                     "last_episodes_length": last_episodes_length,
-                    "lr" : 3e-4}
+                    "discount_factor": discount_factor,
+                    "lr" : 1e-4}
         )
 
 
@@ -132,7 +138,7 @@ def main(testing=False, checkpoint=None):
         while True:
             if testing:
                 env.render()
-                time.sleep(0.01)
+                # time.sleep(0.01)
             tq.update(1)
             if testing:
                 epsilon = 0
@@ -142,7 +148,7 @@ def main(testing=False, checkpoint=None):
             if np.random.rand() < epsilon:
                 action = env.action_space.sample()
             else:
-                best_q_action = m(torch.tensor(last_observation)).detach().max(-1).indices.item()
+                best_q_action = m(torch.tensor(last_observation).to(device)).detach().max(-1).indices.item()
                 action = best_q_action
 
             observation, reward, terminated, truncated, info = env.step(action)
@@ -166,7 +172,7 @@ def main(testing=False, checkpoint=None):
             if (not testing) and rb.size >= min_rb_size and steps_since_train >= env_steps_before_traing:
                 steps_since_target += 1
                 # treinar quando respeita buffer minimo e a cada env_steps_before_traing passos
-                loss = train_step(m, rb.sample(sample_size), target_m)
+                loss = train_step(m, rb.sample(sample_size), target_m, discount_factor)
                 run.log({"loss": loss.detach().item(), "epsilon": epsilon, "last_episodes_reward": np.mean(last_episodes_rewards)}, step=env_steps) # wandb
                 steps_since_train = 0
                 episode_rewards = []
@@ -181,5 +187,7 @@ def main(testing=False, checkpoint=None):
     env.close()
     run.finish()
 
-main(testing=True, checkpoint="./models/771990.pth")
-# main(testing=False)
+# main(testing=True, checkpoint="./models/1064990.pth")
+# main(testing=True, checkpoint="./models/2183900.pth")
+# main(testing=False, optional_name="array with cuda double batch size 128")
+# main(testing=False, optional_name="hypertuning with discountfactor")
