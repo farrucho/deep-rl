@@ -14,13 +14,14 @@ class BreakoutEnv(FrameStackObservation):
         super().__init__(env, stack_size)
         self.env = env
         self.n = stack_size
+        self.previous_obs = np.zeros((self.n, 84,84))
 
     def preprocess_observation(self, observation):
         # resize to 84x84 like in the paper
         new_obs = np.zeros((self.n, 84,84))
         for j in range(0,4):
             new_obs[j] = cv2.resize(cv2.cvtColor(observation[j], cv2.COLOR_RGB2GRAY), (84,84))
-        return new_obs/255
+        return new_obs
         # frame_together = np.hstack(new_obs)
         # return frame_together
 
@@ -32,9 +33,18 @@ class BreakoutEnv(FrameStackObservation):
 
     def step(self, action):
         obs, reward, terminated, truncated, info = super().step(action)
+
         info["rgb_frame"] = obs[-1]
-        updated_observation = self.preprocess_observation(obs)
+
+        # updated_observation = self.preprocess_observation(obs)
+        updated_observation = np.zeros((self.n, 84,84))
+        for j in range(0,self.n-1):
+            updated_observation[j] = self.previous_obs[j+1]
+        updated_observation[-1] = cv2.resize(cv2.cvtColor(obs[-1], cv2.COLOR_RGB2GRAY), (84,84))
         
+        
+        self.previous_obs = updated_observation
+
         # reward clipping, o objetivo é destruir todos os blocos nao ha limite de tempo
         return updated_observation, np.sign(reward), terminated, truncated, info
     
@@ -43,6 +53,7 @@ class BreakoutEnv(FrameStackObservation):
         info["rgb_frame"] = obs[-1]
         updated_observation = self.preprocess_observation(obs)
 
+        self.previous_obs = updated_observation
         return updated_observation, info
 
     
@@ -59,7 +70,7 @@ class BreakoutEnv(FrameStackObservation):
 #     while i < 100:
 #         action = env.action_space.sample()
 #         obs, reward, terminated, truncated, info = env.step(action)
-#         env.save_stack(obs)
+#         env.save_stack(obs*255)
 #         print("saved")
 #         time.sleep(1)
 # except KeyboardInterrupt:
