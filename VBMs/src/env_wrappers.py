@@ -40,7 +40,7 @@ class BreakoutEnv(FrameStackObservation):
         updated_observation = np.zeros((self.n, 84,84))
         for j in range(0,self.n-1):
             updated_observation[j] = self.previous_obs[j+1]
-        updated_observation[-1] = cv2.resize(cv2.cvtColor(obs[-1], cv2.COLOR_RGB2GRAY), (84,84))
+        updated_observation[-1] = cv2.resize(cv2.cvtColor(obs[-1], cv2.COLOR_RGB2GRAY), (84,84)) # este é o mais recente
         
         
         self.previous_obs = updated_observation
@@ -61,18 +61,20 @@ class BreakoutEnv(FrameStackObservation):
         
 
 
-# env = gym.make('ALE/Breakout-v5')
-# env = BreakoutEnv(env, stack_size=4)
-
+# # env = gym.make('ALE/Breakout-v5')
+# env = gym.make('ALE/Pong-v5', render_mode='human')
+# # env = BreakoutEnv(env, stack_size=4)
+# print(env.action_space)
 # observation, info = env.reset()
 # i = 0
 # try:
 #     while i < 100:
+#         # action = int(input())
 #         action = env.action_space.sample()
 #         obs, reward, terminated, truncated, info = env.step(action)
-#         env.save_stack(obs*255)
+#         # env.save_stack(obs*255)
 #         print("saved")
-#         time.sleep(1)
+#         # time.sleep(1)
 # except KeyboardInterrupt:
 #     env.close()
 

@@ -1,0 +1,9 @@
+.venv
+.vscode
+VBMs/src/__pycache__
+VBMs/src/wandb
+VBMs/src/modesl
+VBMs/src/images
+VBMs/src/models
+wandb
+starting

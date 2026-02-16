@@ -29,14 +29,21 @@ class ConvModel(nn.Module):
         self.obs_shape = obs_shape
         self.num_actions = num_actions
 
-        # model exactly the same as in the paper
+        # self.conv_net = nn.Sequential(
+        #     nn.Conv2d(in_channels=4, out_channels=16, kernel_size=(8, 8), stride=(4, 4)),
+        #     nn.ReLU(),
+        #     nn.Conv2d(in_channels=16, out_channels=32, kernel_size=(4, 4), stride=(2, 2)),
+        #     nn.ReLU(),
+        # )
+
         self.conv_net = nn.Sequential(
-            nn.Conv2d(in_channels=4, out_channels=16, kernel_size=(8, 8), stride=(4, 4)),
+            nn.Conv2d(in_channels=4, out_channels=32, kernel_size=(8, 8), stride=(4, 4)),
             nn.ReLU(),
-            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=(4, 4), stride=(2, 2)),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=(4, 4), stride=(2, 2)),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), stride=(1, 1)),
             nn.ReLU(),
         )
-
 
         # we need to calculate the input of the fc_net, that is the output of the conv net
         with torch.no_grad():
@@ -46,22 +53,23 @@ class ConvModel(nn.Module):
 
         if not dueling:
             self.fc_net = nn.Sequential(
-                nn.Linear(fc_input_size, 256),
+                nn.Linear(fc_input_size, 512),
                 nn.ReLU(),
                 nn.Linear(256, num_actions),
             )
         else:
+            # changed from 256 to 512
             self.fc_net = nn.Sequential(
-                nn.Linear(fc_input_size, 256),
+                nn.Linear(fc_input_size, 512),
                 nn.ReLU(),
             )
 
             self.v_net = nn.Sequential( # V(s)
-                nn.Linear(256, 1),
+                nn.Linear(512, 1),
             )
 
             self.action_advantage_net = nn.Sequential( # A(s, a)
-                nn.Linear(256, num_actions),
+                nn.Linear(512, num_actions),
             )
 
 
@@ -69,6 +77,7 @@ class ConvModel(nn.Module):
         self.optimizer = optim.Adam(self.parameters(), lr=lr)
     
     def forward(self, x):
+        x = x.float()/255.0
         conv_latent = self.conv_net(x) # mudar shape (N, 4, 84, 84) para (N, 4*84*84)
         # return self.fc_net(conv_latent.view((conv_latent.shape[0], -1)))
         hidden_layer_out = self.fc_net(conv_latent.flatten(1))

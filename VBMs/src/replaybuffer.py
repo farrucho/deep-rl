@@ -56,10 +56,10 @@ class ReplayBuffer:
 
 
         # self.buffer.append(sars)
-        self.current_states[self._index] = (sars.state * 255).astype(np.uint8)
+        self.current_states[self._index] = sars.state
         self.actions[self._index] = sars.action
         self.rewards[self._index] = sars.reward
-        self.next_states[self._index] = (sars.next_state * 255).astype(np.uint8)
+        self.next_states[self._index] = sars.next_state
         self.terminated[self._index] = 1 if sars.terminated else 0
         self.truncated[self._index] = 1 if sars.truncated else 0
 
@@ -76,12 +76,12 @@ class ReplayBuffer:
 
         device = torch.device("cuda")
         
-        current_states = torch.from_numpy(self.current_states[indices]).to(device, non_blocking=True).float() / 255.0
-        actions = torch.from_numpy(self.actions[indices]).to(device, non_blocking=True).long().unsqueeze(1)
-        rewards = torch.from_numpy(self.rewards[indices]).to(device, non_blocking=True)
-        next_states = torch.from_numpy(self.next_states[indices]).to(device, non_blocking=True).float() / 255.0
-        terminated = torch.from_numpy(self.terminated[indices]).to(device, non_blocking=True)
-        truncated = torch.from_numpy(self.truncated[indices]).to(device, non_blocking=True)
+        current_states = torch.from_numpy(self.current_states[indices]).to(device, non_blocking=True)
+        actions = torch.from_numpy(self.actions[indices]).to(device, non_blocking=True).unsqueeze(1).long()
+        rewards = torch.from_numpy(self.rewards[indices]).to(device, non_blocking=True).float()
+        next_states = torch.from_numpy(self.next_states[indices]).to(device, non_blocking=True)
+        terminated = torch.from_numpy(self.terminated[indices]).to(device, non_blocking=True).float()
+        truncated = torch.from_numpy(self.truncated[indices]).to(device, non_blocking=True).float()
 
         return current_states, actions, rewards, next_states, terminated, truncated
     

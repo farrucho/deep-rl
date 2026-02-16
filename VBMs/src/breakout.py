@@ -14,7 +14,6 @@ from env_wrappers import BreakoutEnv
 def run_test_episode(model, env, max_steps=1000):
     device = torch.device("cuda")
     last_observation, info = env.reset()
-
     frames = []
     total_reward = 0
     idx = 0
@@ -78,16 +77,19 @@ def train_step(model, replay_buffer, target_model, discount_factor=0.99, use_hub
 
     model.optimizer.zero_grad() # zero the gradient buffers
     loss.backward()
+    nn.utils.clip_grad_value_(model.parameters(), 1.0)
     model.optimizer.step() # does the update
-    return loss
+
+    average_max_q = model_q_values.max(dim=1).values.mean().item() # nos estados batch_size pega na acao com maior valor Q e faz a media entre todos os estados
+    return loss, average_max_q
 
 
-def main_breakout(testing=False, checkpoint=None, optional_name="normal run"):
+def main_breakout(testing=False, checkpoint=None, optional_name="normal run", gym_make_env="ALE/Breakout-v5"):
     device = torch.device("cuda")
     if testing:
-        env = gym.make('ALE/Breakout-v5', render_mode='human')
+        env = gym.make(gym_make_env, render_mode='human')
     else:
-        env = gym.make('ALE/Breakout-v5')
+        env = gym.make(gym_make_env)
     env = BreakoutEnv(env, stack_size=4)
 
     last_observation, info = env.reset()
@@ -106,15 +108,15 @@ def main_breakout(testing=False, checkpoint=None, optional_name="normal run"):
 
 
     # linear decay greedy
-    min_rb_size = 10000 # minimum buffer to start training
-    sample_size = 32
+    min_rb_size = 100000 # minimum buffer to start training
+    sample_size = 64
     env_steps_before_traing = 4
-    target_model_update = 1000 # atualiza a target a cada N TRAINING steps, isto é N epochs, em raw steps: N*env_steps_before_traing
+    target_model_update = 2000 # atualiza a target a cada N TRAINING steps, isto é N epochs, em raw steps: N*env_steps_before_traing
 
     # linear decay greedy
     init_epsilon = 1
-    min_epsilon = 0.05
-    decay_episodes = 1000000 # steps necessary to reach min_epsilon
+    min_epsilon = 0.1
+    decay_episodes = 5000000 # steps necessary to reach min_epsilon
 
     last_episodes_length = 50
     last_episodes_rewards = deque(maxlen=last_episodes_length) # episodios antigos sao removidos para dara lugar aos novos, assim mantem se track sempre dos ultimos
@@ -186,12 +188,12 @@ def main_breakout(testing=False, checkpoint=None, optional_name="normal run"):
                 current_episode_reward = 0
 
             if env_steps % steps_to_video_and_model_save == 0:
-                rew, frames = run_test_episode(target_m,BreakoutEnv(gym.make('ALE/Breakout-v5'), stack_size=4), max_steps=5000)
+                rew, frames = run_test_episode(target_m,BreakoutEnv(gym.make(gym_make_env), stack_size=4), max_steps=5000)
                 frames = frames.transpose(0, 3, 1, 2)
                 # # frames = (frames * 255).astype(np.uint8)
                 # frames = frames[:, None, :, :]
                 # frames = np.repeat(frames, 3, axis=1)  # (T,3,H,W)
-                run.log({"test_reward": rew, "test_video": wandb.Video(frames, caption=str(rew), fps=25, format="mp4")})
+                run.log({"test_reward": rew, "test_video": wandb.Video(frames, caption=str(rew), fps=30, format="mp4")})
                 torch.save(target_m.state_dict(),f"models/breakout/{env_steps}.pth")
 
             steps_since_train += 1
@@ -199,9 +201,9 @@ def main_breakout(testing=False, checkpoint=None, optional_name="normal run"):
             if (not testing) and rb.size >= min_rb_size and steps_since_train >= env_steps_before_traing:
                 steps_since_target += 1
                 # treinar quando respeita buffer minimo e a cada env_steps_before_traing passos
-                loss = train_step(m, rb, target_m, discount_factor, use_huber_loss=True)
+                loss , average_max_q = train_step(m, rb, target_m, discount_factor, use_huber_loss=True)
                 if env_steps % log_steps == 0:
-                    run.log({"loss": loss.detach().item(), "epsilon": epsilon, "last_episodes_reward": np.mean(last_episodes_rewards)}, step=env_steps) # wandb
+                    run.log({"loss": loss.detach().item(), "epsilon": epsilon, "last_episodes_reward": np.mean(last_episodes_rewards), "average_max_q": average_max_q}, step=env_steps) # wandb
                 steps_since_train = 0
                 episode_rewards = []
                 if steps_since_target >= target_model_update:
@@ -215,4 +217,6 @@ def main_breakout(testing=False, checkpoint=None, optional_name="normal run"):
     run.finish()
 
 
-main_breakout(testing=False, optional_name="HypyerTuning")
+# main_breakout(testing=False, optional_name="HyperTuning")
+# main_breakout(testing=False, optional_name="BreakoutNoFrameskip-v4")
+main_breakout(testing=False, optional_name="tuning ALE/Pong-v5", gym_make_env="ALE/Pong-v5")
