@@ -7,3 +7,5 @@ VBMs/src/images
 VBMs/src/models
 wandb
 starting
+ACMs/__pycache__
+ACMs/models

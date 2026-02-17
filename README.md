@@ -1,3 +1,5 @@
 # deep-rl
 
-no LLMs were used in this project
+value based methods inside VBMs
+
+actor critic methods inside ACMs

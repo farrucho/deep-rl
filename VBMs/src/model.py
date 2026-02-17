@@ -55,7 +55,7 @@ class ConvModel(nn.Module):
             self.fc_net = nn.Sequential(
                 nn.Linear(fc_input_size, 512),
                 nn.ReLU(),
-                nn.Linear(256, num_actions),
+                nn.Linear(512, num_actions),
             )
         else:
             # changed from 256 to 512
