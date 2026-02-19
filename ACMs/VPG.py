@@ -1,4 +1,5 @@
 import gymnasium as gym
+from jax import checkpoint
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -32,7 +33,7 @@ def generate_episode(policy_model, state_values_model, env, max_steps=1000000):
         
         state_value = state_values_model(last_observation_tensor)
         logprob = dist.log_prob(action)
-        entropy = - torch.sum(softmax_probs * torch.log(softmax_probs), dim=-1)
+        entropy = dist.entropy() # this uses ln(6) - torch.sum(softmax_probs * torch.log2(softmax_probs), dim=-1) 
 
 
         observation, reward, terminated, truncated, info = env.step(action.item())
@@ -50,7 +51,7 @@ def generate_episode(policy_model, state_values_model, env, max_steps=1000000):
 
 
 
-def main_vpg(gym_make_env, params, wand_name):
+def main_vpg(gym_make_env, params, wand_name, policy_checkpoint=None, value_checkpoint=None):
     # --- wandb configuration ---
     run = wandb.init(
         entity="franciscolaranjo9-personal",
@@ -67,6 +68,11 @@ def main_vpg(gym_make_env, params, wand_name):
     last_observation, info = env.reset()
     policy_model = PolicyReinforceModel(last_observation.shape, env.action_space.n, lr=params["lr"]).to(device)
     value_model = ValueStateModel(last_observation.shape, lr=params["lr"]).to(device)
+
+    if policy_checkpoint is not None:
+        policy_model.load_state_dict(torch.load(policy_checkpoint))
+    if value_checkpoint is not None:
+        value_model.load_state_dict(torch.load(value_checkpoint))
 
 
     last_episodes_length = 20
@@ -95,7 +101,7 @@ def main_vpg(gym_make_env, params, wand_name):
             value_model_loss = torch.mean(torch.pow(discounted_rewards - state_values,2)) # do not normalize state values
 
             advantage_term_policy = discounted_rewards - state_values.detach()
-            advantage_term_policy = (advantage_term_policy - advantage_term_policy.mean()) / (advantage_term_policy.std() + 1e-8) # normalize
+            advantage_term_policy = (advantage_term_policy - advantage_term_policy.mean()) / (advantage_term_policy.std() + 1e-8) # normalize, in this case the mean will be 0
             policy_model_loss = -torch.mean((advantage_term_policy)*logprobs + params["beta"]*entropies) # detach aqui é essencial caso contrario a backprop vai para o value model, coisa que não queremos, pois so estamos a dar update ao step model
 
             value_model.optimizer.zero_grad() # zero the gradient buffers    
@@ -113,7 +119,7 @@ def main_vpg(gym_make_env, params, wand_name):
 
             last_episodes_rewards.append(torch.sum(rewards).item())
             if _envsteps % log_steps == 0:
-                run.log({"policy_model_loss": policy_model_loss, "value_model_loss": value_model_loss, "episode_reward": torch.sum(rewards), "last_episodes_reward": np.mean(last_episodes_rewards)}, step=_envsteps)
+                run.log({"policy_model_loss": policy_model_loss, "value_model_loss": value_model_loss, "episode_reward": torch.sum(rewards), "last_episodes_reward": np.mean(last_episodes_rewards), "mean_entropy": torch.mean(entropies).item(), "advantage_term_policy": torch.mean(advantage_term_policy).item()}, step=_envsteps)
             if _envsteps % save_steps == 0:
                 torch.save(policy_model.state_dict(),f"models/{gym_make_env}/policy_model/{_envsteps}.pth")
                 torch.save(value_model.state_dict(),f"models/{gym_make_env}/value_model/{_envsteps}.pth")
@@ -130,7 +136,7 @@ def main_vpg(gym_make_env, params, wand_name):
 params = {
     "lr": 1e-4,
     "discount_factor": 0.99,
-    "beta": 1e-3 # for pong max entropy is log(6) = 1.79
+    "beta": 1e-3 # for pong max entropy is -6*1/6*log2(1/6) = 2.585 or if dist.entropy() ln(6) = 1.79
 }
 
-main_vpg(gym_make_env="ALE/Pong-v5", params=params, wand_name="Pong Normalized Advantage")
+main_vpg(gym_make_env="ALE/Pong-v5", params=params, wand_name="Pong - Part3", policy_checkpoint="models/ALE/Pong-v5/policy_model/1950.pth", value_checkpoint="models/ALE/Pong-v5/value_model/1950.pth")

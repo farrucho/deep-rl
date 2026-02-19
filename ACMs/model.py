@@ -60,7 +60,23 @@ class PolicySimpleReinforceModel(nn.Module):
     
     def forward(self, x):
         return self.net(x)
+
+class ValueSimpleStateModel(nn.Module):
+    # used for cartpole
+    def __init__(self, obs_shape, lr=1e-4):
+        super(ValueSimpleStateModel, self).__init__()
+        self.obs_shape = obs_shape
+
+        self.net = nn.Sequential(
+            nn.Linear(obs_shape[0], 256), # fully connected layer
+            nn.ReLU(), # activation layer
+            nn.Linear(256, 1), # final layer
+        )
+        self.optimizer = optim.Adam(self.net.parameters(), lr=lr)
     
+    def forward(self, x):
+        return self.net(x)
+
 class ValueStateModel(nn.Module):
     def __init__(self, obs_shape, lr=1e-4):
         super(ValueStateModel, self).__init__()
