@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from traitlets import Int
 # import torch.nn.function as F
 
 

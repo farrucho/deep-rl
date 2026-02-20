@@ -20,7 +20,7 @@ class AtariEnv(FrameStackObservation):
         # resize to 84x84
         new_obs = np.zeros((self.n, 84,84))
         for j in range(0,4):
-            new_obs[j] = cv2.resize(cv2.cvtColor(observation[j], cv2.COLOR_RGB2GRAY), (84,84))
+            new_obs[j] = cv2.resize(cv2.resize(cv2.cvtColor(observation[j], cv2.COLOR_RGB2GRAY), (84, 110), interpolation=cv2.INTER_AREA)[18:101,:], (84,84))
         return new_obs
 
     def save_stack(self, observation, filename="images/test.png"):
@@ -37,7 +37,9 @@ class AtariEnv(FrameStackObservation):
         updated_observation = np.zeros((self.n, 84,84))
         for j in range(0,self.n-1):
             updated_observation[j] = self.previous_obs[j+1]
-        updated_observation[-1] = cv2.resize(cv2.cvtColor(obs[-1], cv2.COLOR_RGB2GRAY), (84,84)) # este é o mais recente
+        
+        # PONG
+        updated_observation[-1] = cv2.resize(cv2.resize(cv2.cvtColor(obs[-1], cv2.COLOR_RGB2GRAY), (84, 110), interpolation=cv2.INTER_AREA)[18:101,:], (84,84)) # este é o mais recente
         
         
         self.previous_obs = updated_observation
@@ -59,8 +61,8 @@ class AtariEnv(FrameStackObservation):
 
 
 # # env = gym.make('ALE/Breakout-v5')
-# env = gym.make('ALE/Pong-v5', render_mode='human')
-# # env = BreakoutEnv(env, stack_size=4)
+# env = gym.make('ALE/Pong-v5')
+# env = AtariEnv(env, stack_size=4)
 # print(env.action_space)
 # observation, info = env.reset()
 # i = 0
@@ -69,9 +71,9 @@ class AtariEnv(FrameStackObservation):
 #         # action = int(input())
 #         action = env.action_space.sample()
 #         obs, reward, terminated, truncated, info = env.step(action)
-#         # env.save_stack(obs*255)
+#         env.save_stack(obs*255,filename="test4.png")
 #         print("saved")
-#         # time.sleep(1)
+#         time.sleep(1)
 # except KeyboardInterrupt:
 #     env.close()
 

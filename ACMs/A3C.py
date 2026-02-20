@@ -1,5 +1,5 @@
 import gymnasium as gym
-from sympy import false
+import os
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -10,44 +10,98 @@ from env_wrappers import AtariEnv
 from model import PolicyReinforceModel, PolicySimpleReinforceModel, ValueStateModel, ValueSimpleStateModel
 import wandb
 import torch.multiprocessing as mp
+from collections import deque
+
+
+class SharedAdam(torch.optim.Adam):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0, amsgrad=False):
+        super(SharedAdam, self).__init__(
+            params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, amsgrad=amsgrad)
+        
+        for group in self.param_groups:
+            for p in group['params']:
+                state = self.state[p]
+
+                state['step'] = torch.zeros(1)
+                state['exp_avg'] = torch.zeros_like(p.data)
+                state['exp_avg_sq'] = torch.zeros_like(p.data)
+
+                state['step'].share_memory_()
+                state['exp_avg'].share_memory_()
+                state['exp_avg_sq'].share_memory_()
+
+
 
 
 class A3C():
-    def __init__(self, params, gym_env_name, num_workers, wand_name, log_episode_k):
+    def __init__(self, params, gym_env_name, num_workers, wand_name):
         self.params = params
-        self.device = torch.device("cpu")
+        # self.device = torch.device("cpu")
+        self.device = torch.device("cuda")
 
         self.gym_env_name = gym_env_name
-        self.env = gym.make(gym_env_name)
+        # self.env = gym.make(gym_env_name)
+        self.env = AtariEnv(gym.make(gym_env_name), stack_size=4)
+
         last_observation, info = self.env.reset()
         self.observation_shape = last_observation.shape
         self.num_actions = self.env.action_space.n # type: ignore
 
-        self.global_policy_model = PolicySimpleReinforceModel(self.observation_shape, self.num_actions, lr=self.params["lr"]).to(self.device)
-        self.global_state_model = ValueSimpleStateModel(self.observation_shape, lr=self.params["lr"]).to(self.device)
+        # self.global_policy_model = PolicySimpleReinforceModel(self.observation_shape, self.num_actions, lr=self.params["lr"]).to(self.device)
+        # self.global_state_model = ValueSimpleStateModel(self.observation_shape, lr=self.params["lr"]).to(self.device)
+        self.global_policy_model = PolicyReinforceModel(self.observation_shape, self.num_actions, lr=self.params["lr"]).to(self.device)
+        self.global_state_model = ValueStateModel(self.observation_shape, lr=self.params["lr"]).to(self.device)
+
 
         self.global_policy_model.share_memory()
         self.global_state_model.share_memory()
+
+        self.policy_optimizer = SharedAdam(
+            self.global_policy_model.parameters(),
+            lr=self.params["lr"]
+        )
+
+        self.state_optimizer = SharedAdam(
+            self.global_state_model.parameters(),
+            lr=self.params["lr"]
+        )
 
         self.num_workers = num_workers
 
         self.get_out_signal = False
 
-        self.run = wandb.init(
+        self.wandb_name = wand_name
+        # self.run = wandb.init(
+        #     entity="franciscolaranjo9-personal",
+        #     project="A3C",
+        #     name=wand_name,
+        #     config = self.params
+        # )
+
+        self._steps = mp.Value('i', 0)
+        self._episodes = mp.Value('i', 0)
+
+        self.log_episode_k = self.params["log_episode_k"]
+        self.save_episode_k = self.params["save_episode_k"]
+        self.deque_test_rewards = deque(maxlen=self.params["deque_test_rewards"])
+
+        self.log_queue = mp.Queue()
+    
+    def log_process(self):
+        print("log process ready")
+        run = wandb.init(
             entity="franciscolaranjo9-personal",
             project="A3C",
-            name=wand_name,
-            config = self.params
+            name=self.wandb_name,
+            config=self.params
         )
-        self._steps = 0
-        self._episodes = 0
-        self.log_episode_k = log_episode_k
+
+        while True:
+            log_dict = self.log_queue.get()
+            run.log(log_dict)
+
     
-    
-    def generate_episode(self, policy_model, state_values_model, max_steps=1000000):
-        # TODO ESTA ERRADO POIS SO GERA EPISODIO ATE N_sTEPBOOSTRAPING DEPOIS PAROU
-        local_env = gym.make(self.gym_env_name)
-        last_observation, info = local_env.reset()
+    def generate_episode(self, local_env, last_observation, policy_model, state_values_model, max_steps=1000000):
         rewards = []
         logprobs = []
         state_values = []
@@ -72,15 +126,16 @@ class A3C():
             entropy = dist.entropy() # this uses ln(6) - torch.sum(softmax_probs * torch.log2(softmax_probs), dim=-1) 
 
 
+
             observation, reward, terminated, truncated, info = local_env.step(action.item())
 
             if terminated:
                bootstrap_value = 0
+               last_observation, _ = local_env.reset()
                exit_loop = True 
             if _idx == max_steps:
                 bootstrap_value = state_values_model(torch.from_numpy(observation).unsqueeze(0).to(self.device).float()).detach().item()
                 exit_loop = True
-
 
             last_observation = observation
             rewards.append(reward)
@@ -90,27 +145,31 @@ class A3C():
             # frames.append(info["rgb_frame"])
             frames.append(0)
             _idx += 1
-            self._steps += 1
-
-
-
-        return torch.tensor(rewards).unsqueeze(1), torch.stack(logprobs), torch.stack(state_values).squeeze(1), torch.stack(entropies), bootstrap_value, np.stack(frames, 0)
+            
+            with self._steps.get_lock():
+                self._steps.value += 1
+        
+        return local_env, last_observation, torch.tensor(rewards).unsqueeze(1), torch.stack(logprobs), torch.stack(state_values).squeeze(1), torch.stack(entropies), bootstrap_value, np.stack(frames, 0)
 
 
     def work(self, rank):
         print(f"Worker {rank} at your service")
         
+        # local_env = gym.make(self.gym_env_name)
+        local_env = AtariEnv(gym.make(self.gym_env_name), stack_size=4)
+        last_observation, info = local_env.reset()
         _episodes = 0
+        
+        local_policy_model = PolicyReinforceModel(self.observation_shape, self.num_actions, lr=self.params["lr"]).to(self.device) # TODO METER ISTO EM CIMA CAUSA BUG E ENTROPIA COLAPSA LOGO???
+        local_value_model = ValueStateModel(self.observation_shape, lr=self.params["lr"]).to(self.device)
+        
         while not self.get_out_signal:
-            local_policy_model = PolicySimpleReinforceModel(self.observation_shape, self.num_actions, lr=self.params["lr"]).to(self.device) # TODO METER ISTO EM CIMA CAUSA BUG E ENTROPIA COLAPSA LOGO???
-            local_value_model = ValueSimpleStateModel(self.observation_shape, lr=self.params["lr"]).to(self.device)
-
             local_policy_model.load_state_dict(self.global_policy_model.state_dict())
             local_value_model.load_state_dict(self.global_state_model.state_dict())
 
 
             # ---generate episode ---
-            rewards, logprobs, state_values, entropies, bootstrap_value, frames_of_episode = self.generate_episode(local_policy_model, local_value_model, max_steps=self.params["n_step_bootstrapping"])
+            local_env, last_observation, rewards, logprobs, state_values, entropies, bootstrap_value, frames_of_episode = self.generate_episode(local_env, last_observation, local_policy_model, local_value_model, max_steps=self.params["n_step_bootstrapping"])
 
             discounted_rewards = torch.zeros_like(rewards, dtype=torch.float32, device=self.device)
             G = bootstrap_value
@@ -125,53 +184,75 @@ class A3C():
 
             advantage_term_policy = discounted_rewards - state_values.detach()
             # advantage_term_policy = (advantage_term_policy - advantage_term_policy.mean()) / (advantage_term_policy.std() + 1e-8) # normalize, in this case the mean will be 0
-            local_policy_model_loss = -torch.mean((advantage_term_policy)*logprobs + params["beta"]*entropies) # detach aqui é essencial caso contrario a backprop vai para o value model, coisa que não queremos, pois so estamos a dar update ao step model
+
+            local_policy_model_loss = -torch.mean((advantage_term_policy)*logprobs) - self.params["beta"]*torch.mean(entropies) # detach aqui é essencial caso contrario a backprop vai para o value model, coisa que não queremos, pois so estamos a dar update ao step model
 
 
-            # --- optimize --- do i need lock here? # TODO
-            self.global_policy_model.zero_grad()
+            # --- optimize ---
+            self.policy_optimizer.zero_grad()
             local_policy_model_loss.backward()
-            # TODO clip gradientes? nn.utils.clip_grad_norm_(local_policy_model.parameters(), policy_max_grad_norm)
+            nn.utils.clip_grad_norm_(local_policy_model.parameters(), self.params["clip_grad"])
 
             # copy gradients from the local model to shared model
             for param, shared_param in zip(local_policy_model.parameters(), self.global_policy_model.parameters()):
-                if shared_param.grad is None: # only push when global_policy has learned once
-                    shared_param._grad = param.grad
+                # if shared_param.grad is None: # only push when global_policy has learned once
+                shared_param._grad = param.grad
 
-            self.global_policy_model.optimizer.step()
+            self.policy_optimizer.step()
             local_policy_model.load_state_dict(self.global_policy_model.state_dict())
 
 
-            self.global_state_model.zero_grad()
+            self.state_optimizer.zero_grad()
             local_state_model_loss.backward()
-            # TODO clip gradientes? nn.utils.clip_grad_norm_(local_policy_model.parameters(), policy_max_grad_norm)
+            nn.utils.clip_grad_norm_(local_value_model.parameters(), self.params["clip_grad"])
 
             # copy gradients from the local model to shared model
             for param, shared_param in zip(local_value_model.parameters(), self.global_state_model.parameters()):
-                if shared_param.grad is None: # only push when global_policy has learned once
-                        shared_param._grad = param.grad
+                # if shared_param.grad is None: # only push when global_policy has learned once
+                shared_param._grad = param.grad
 
-            self.global_state_model.optimizer.step()
+            self.state_optimizer.step()
             local_value_model.load_state_dict(self.global_state_model.state_dict())
 
-            # rank 0 is the responsible for logging test episodes to see episode generated by global policy  
-            if rank == 0 and self._episodes % self.log_episode_k == 0:
-                rewards, logprobs, state_values, entropies, bootstrap_value, frames_of_episode = self.generate_episode(self.global_policy_model, self.global_state_model, max_steps=self.params["n_step_bootstrapping"])
-                self.run.log({f"episode_reward" : rewards.sum().item(), \
-                                f"mean_entropy" : torch.mean(entropies).item(), \
-                                        f"total_episodes" : self._episodes})
-
-
-            self.run.log({f"rank_{rank}/episode_reward" : rewards.sum().item(), \
-                          f"rank_{rank}/policy_model_loss" : local_policy_model_loss, \
-                            f"rank_{rank}/state_model_loss" : local_state_model_loss, \
-                                f"rank_{rank}/mean_entropy" : torch.mean(entropies).item(), \
-                                    f"rank_{rank}/advantage_term_policy" : torch.mean(advantage_term_policy).item(), \
-                                        f"rank_{rank}/episode" : _episodes})
             _episodes += 1
-            self._episodes += 1
+            with self._episodes.get_lock():
+                self._episodes.value += 1
+
+
+            if rank == 0 and _episodes % self.log_episode_k == 0:
+                # test_env = gym.make(self.gym_env_name)
+                test_env = AtariEnv(gym.make(self.gym_env_name), stack_size=4)
+                test_env_observation, info = test_env.reset()
+                test_env, test_env_observation, rewards, logprobs, state_values, entropies, bootstrap_value, frames_of_episode = self.generate_episode(test_env, test_env_observation, self.global_policy_model, self.global_state_model, max_steps=100000000)
+                total_reward = rewards.sum().item()
+                self.deque_test_rewards.append(total_reward)
+                self.log_queue.put(
+                    {f"full_episode_reward" : total_reward, \
+                        f"mean_entropy" : torch.mean(entropies).item(), \
+                                f"total_episodes" : self._episodes.value, \
+                                    f"deque_test_rewards": np.mean(self.deque_test_rewards), \
+                                        f"total_step": self._steps.value}
+                )
+
+            if rank == 0 and _episodes % self.save_episode_k == 0:
+                os.makedirs(f"models/A3C/{self.gym_env_name}/{self.wandb_name}/policy_model/")
+                os.makedirs(f"models/A3C/{self.gym_env_name}/{self.wandb_name}/value_model/")
+                torch.save(self.global_policy_model.state_dict(),f"models/A3C/{self.gym_env_name}/{self.wandb_name}/policy_model/{self._episodes.value}.pth")
+                torch.save(self.global_state_model.state_dict(),f"models/A3C/{self.gym_env_name}/{self.wandb_name}/value_model/{self._episodes.value}.pth")
+
+
+            self.log_queue.put(
+                {f"rank_{rank}/generated_episode_reward" : rewards.sum().item(), \
+                    f"rank_{rank}/policy_model_loss" : local_policy_model_loss.item(), \
+                        f"rank_{rank}/state_model_loss" : local_state_model_loss.item(), \
+                            f"rank_{rank}/mean_entropy" : torch.mean(entropies).item(), \
+                                f"rank_{rank}/advantage_term_policy" : torch.mean(advantage_term_policy).item(), \
+                                    f"rank_{rank}/episode" : _episodes}
+            )
         
     def train(self):
+        log_p = mp.Process(target=self.log_process)
+        log_p.start()
         processes = []
         for j in range(0, self.num_workers):
             p = mp.Process(target=self.work, args=(j,))
@@ -186,24 +267,27 @@ class A3C():
             processes.append(p)
         for p in processes:
             p.join()
+        log_p.join()
          
 
 
+
 params = {
-    "lr": 1e-4,
-    "n_step_bootstrapping": 1000,
+    "lr": 3e-5,
     "discount_factor": 0.99,
-    "beta": 1e-3,
-    "n_step_bootstrapping": 300,
+    "beta": 1e-2,
+    "n_step_bootstrapping": 15,
+    "clip_grad": 40,
+
+    # non related to algorithm
+    "log_episode_k" : 10,
+    "deque_test_rewards" : 20,
+    "save_episode_k": 600 # not global episode, rank0 worker episodes
 }
+
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
-    a3c = A3C(params, gym_env_name="CartPole-v1", num_workers=16 , wand_name="Cartpole 16 workers", log_episode_k=50)
+    # a3c = A3C(params, gym_env_name="CartPole-v1", num_workers=16 , wand_name="Testing Cartpole 16 workers")
+    a3c = A3C(params, gym_env_name="ALE/Pong-v5", num_workers=12, wand_name="Fixing SharedAdam Tuning Pong 12 workers")
 
     a3c.train()
-
-    # TODO
-    # atualmente cada episodio apenas corre ate terminar OU n_steps, se nstepboostrapping for pequeno o episodio nao corre ate ao final fica limitiado,ver como se faz a implemetnacao correta!
-    # SHARED ADAM OPTIMIZER,
-    # - clip gradient, 
-    # - ver bug de criaar model a cada episodio .
