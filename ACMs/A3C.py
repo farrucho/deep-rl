@@ -36,8 +36,8 @@ class SharedAdam(torch.optim.Adam):
 class A3C():
     def __init__(self, params, gym_env_name, num_workers, wand_name):
         self.params = params
-        # self.device = torch.device("cpu")
-        self.device = torch.device("cuda")
+        self.device = torch.device("cpu")
+        # self.device = torch.device("cuda")
 
         self.gym_env_name = gym_env_name
         # self.env = gym.make(gym_env_name)
@@ -183,7 +183,7 @@ class A3C():
             local_state_model_loss = torch.mean(torch.pow(discounted_rewards - state_values,2)) # do not normalize state values
 
             advantage_term_policy = discounted_rewards - state_values.detach()
-            # advantage_term_policy = (advantage_term_policy - advantage_term_policy.mean()) / (advantage_term_policy.std() + 1e-8) # normalize, in this case the mean will be 0
+            advantage_term_policy = (advantage_term_policy - advantage_term_policy.mean()) / (advantage_term_policy.std() + 1e-8) # normalize, in this case the mean will be 0
 
             local_policy_model_loss = -torch.mean((advantage_term_policy)*logprobs) - self.params["beta"]*torch.mean(entropies) # detach aqui é essencial caso contrario a backprop vai para o value model, coisa que não queremos, pois so estamos a dar update ao step model
 
@@ -191,12 +191,13 @@ class A3C():
             # --- optimize ---
             self.policy_optimizer.zero_grad()
             local_policy_model_loss.backward()
-            nn.utils.clip_grad_norm_(local_policy_model.parameters(), self.params["clip_grad"])
 
             # copy gradients from the local model to shared model
             for param, shared_param in zip(local_policy_model.parameters(), self.global_policy_model.parameters()):
                 # if shared_param.grad is None: # only push when global_policy has learned once
                 shared_param._grad = param.grad
+
+            nn.utils.clip_grad_norm_(local_policy_model.parameters(), self.params["clip_grad"])
 
             self.policy_optimizer.step()
             local_policy_model.load_state_dict(self.global_policy_model.state_dict())
@@ -223,23 +224,24 @@ class A3C():
                 # test_env = gym.make(self.gym_env_name)
                 test_env = AtariEnv(gym.make(self.gym_env_name), stack_size=4)
                 test_env_observation, info = test_env.reset()
-                test_env, test_env_observation, rewards, logprobs, state_values, entropies, bootstrap_value, frames_of_episode = self.generate_episode(test_env, test_env_observation, self.global_policy_model, self.global_state_model, max_steps=100000000)
-                total_reward = rewards.sum().item()
+                test_env, test_env_observation, test_rewards, test_logprobs, test_state_values, test_entropies, test_bootstrap_value, frames_of_episode = self.generate_episode(test_env, test_env_observation, self.global_policy_model, self.global_state_model, max_steps=100000000)
+                total_reward = test_rewards.sum().item()
                 self.deque_test_rewards.append(total_reward)
                 self.log_queue.put(
                     {f"full_episode_reward" : total_reward, \
-                        f"mean_entropy" : torch.mean(entropies).item(), \
+                        f"mean_entropy" : torch.mean(test_entropies).item(), \
                                 f"total_episodes" : self._episodes.value, \
                                     f"deque_test_rewards": np.mean(self.deque_test_rewards), \
                                         f"total_step": self._steps.value}
                 )
 
             if rank == 0 and _episodes % self.save_episode_k == 0:
-                os.makedirs(f"models/A3C/{self.gym_env_name}/{self.wandb_name}/policy_model/")
-                os.makedirs(f"models/A3C/{self.gym_env_name}/{self.wandb_name}/value_model/")
-                torch.save(self.global_policy_model.state_dict(),f"models/A3C/{self.gym_env_name}/{self.wandb_name}/policy_model/{self._episodes.value}.pth")
-                torch.save(self.global_state_model.state_dict(),f"models/A3C/{self.gym_env_name}/{self.wandb_name}/value_model/{self._episodes.value}.pth")
-
+                try:
+                    os.makedirs(f"models/A3C/{self.gym_env_name}/{self.wandb_name}/policy_model/")
+                    os.makedirs(f"models/A3C/{self.gym_env_name}/{self.wandb_name}/value_model/")
+                except:
+                    torch.save(self.global_policy_model.state_dict(),f"models/A3C/{self.gym_env_name}/{self.wandb_name}/policy_model/{self._episodes.value}.pth")
+                    torch.save(self.global_state_model.state_dict(),f"models/A3C/{self.gym_env_name}/{self.wandb_name}/value_model/{self._episodes.value}.pth")
 
             self.log_queue.put(
                 {f"rank_{rank}/generated_episode_reward" : rewards.sum().item(), \
@@ -273,21 +275,21 @@ class A3C():
 
 
 params = {
-    "lr": 3e-5,
+    "lr": 1e-4,
     "discount_factor": 0.99,
-    "beta": 1e-2,
+    "beta": 0.01,
     "n_step_bootstrapping": 15,
     "clip_grad": 40,
 
     # non related to algorithm
     "log_episode_k" : 10,
     "deque_test_rewards" : 20,
-    "save_episode_k": 600 # not global episode, rank0 worker episodes
+    "save_episode_k": 550 # not global episode, rank0 worker episodes
 }
 
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
     # a3c = A3C(params, gym_env_name="CartPole-v1", num_workers=16 , wand_name="Testing Cartpole 16 workers")
-    a3c = A3C(params, gym_env_name="ALE/Pong-v5", num_workers=12, wand_name="Fixing SharedAdam Tuning Pong 12 workers")
-
+    a3c = A3C(params, gym_env_name="PongNoFrameskip-v4", num_workers=8, wand_name="Tuning Pong 8 workers")
+    
     a3c.train()
